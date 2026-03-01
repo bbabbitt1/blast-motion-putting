@@ -22,13 +22,14 @@ if __name__ == '__main__':
     engine = get_engine()
     max_session_id = get_high_watermark(engine)
     new_sessions = [s for s in sessions_list if s['id'] > max_session_id]
+    print(f"New sessions found: {len(new_sessions)}")
 
     # Step 4: Fetch putts for each session
-    all_putts = get_putts(session, sessions_list)
+    all_putts = get_putts(session, new_sessions)
 
     # Step 5: Clean dataframes
     df_putts = clean_putts_df(pd.DataFrame(all_putts))
-    sessions_df = clean_sessions_df(pd.DataFrame(sessions_data['sessions']))
+    sessions_df = clean_sessions_df(pd.DataFrame(new_sessions))
 
     # Step 6: Load to PostgreSQL
     sessions_df.to_sql('blast_sessions', engine, schema='src', if_exists='append', index=False)
