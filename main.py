@@ -19,7 +19,6 @@ from utils import (
 )
 from config import BASE_URL, LOGIN_ENDPOINT, SESSIONS_ENDPOINT, DATA_ENDPOINT, DEFAULT_PARAMS, TIMEOUT
 
-
 load_dotenv()
 
 # Initialize logger and run ID
@@ -33,7 +32,8 @@ def record_factory(*args, **kwargs):
     return record
 logging.setLogRecordFactory(record_factory)
 
-if __name__ == '__main__':
+
+def run_pipeline():
     logger.info("Starting Blast Motion pipeline")
 
     try:
@@ -77,7 +77,7 @@ if __name__ == '__main__':
             with engine.begin() as conn:
                 try:
                     upsert_sessions(sessions_df, engine)
-                    upsert_putts(df_putts, engine)cd 
+                    upsert_putts(df_putts, engine)
                     logger.info("Transaction committed successfully")
                 except Exception as e:
                     logger.error(f"Transaction failed, rolling back: {e}")
@@ -92,3 +92,7 @@ if __name__ == '__main__':
     except Exception as e:
         logger.critical(f"Unexpected pipeline failure: {e}")
         raise
+
+
+if __name__ == '__main__':
+    run_pipeline()
