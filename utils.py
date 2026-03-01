@@ -1,5 +1,5 @@
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text 
 from dotenv import load_dotenv
 import os
 import time
@@ -152,7 +152,6 @@ def get_engine():
     )
 
 
-
 def get_with_retry(session, url, params=None, retries=3, wait=10):
     for attempt in range(retries):
         try:
@@ -164,3 +163,13 @@ def get_with_retry(session, url, params=None, retries=3, wait=10):
                 print(f"Retrying in {wait} seconds...")
                 time.sleep(wait)
     raise Exception(f"All {retries} attempts failed for {url}")
+
+
+def get_high_watermark(engine):
+    with open('sql/queries/get_high_watermark.sql') as f:
+        query = f.read()
+    with engine.connect() as conn:
+        result = conn.execute(text(query))
+        watermark = result.scalar()
+        print(f"High watermark: {watermark}")
+        return watermark
