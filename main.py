@@ -1,39 +1,94 @@
 import requests
+import logging
 from dotenv import load_dotenv
 import pandas as pd
-from utils import clean_putts_df, clean_sessions_df, get_engine, login, get_sessions, get_putts, get_csrf_token, get_high_watermark
+
+from exceptions import BlastAPIError, BlastAuthError
+from logger import get_logger, get_run_id
+from utils import (
+    clean_putts_df,
+    clean_sessions_df,
+    get_engine,
+    login,
+    get_sessions,
+    get_putts,
+    get_csrf_token,
+    get_high_watermark,
+    upsert_sessions,
+    upsert_putts
+)
 from config import BASE_URL, LOGIN_ENDPOINT, SESSIONS_ENDPOINT, DATA_ENDPOINT, DEFAULT_PARAMS, TIMEOUT
+
 
 load_dotenv()
 
+# Initialize logger and run ID
+run_id = get_run_id()
+logger = get_logger('blast_pipeline')
+
+old_factory = logging.getLogRecordFactory()
+def record_factory(*args, **kwargs):
+    record = old_factory(*args, **kwargs)
+    record.run_id = run_id
+    return record
+logging.setLogRecordFactory(record_factory)
+
 if __name__ == '__main__':
-    session = requests.Session()
+    logger.info("Starting Blast Motion pipeline")
 
-    # Step 1: GET CSRF Token
-    token = get_csrf_token(session)
+    try:
+        session = requests.Session()
 
-    # Step 2: POST login
-    login_response = login(session, token)
+        # Step 1: GET CSRF Token
+        logger.info("Fetching CSRF token")
+        token = get_csrf_token(session)
 
-    # Step 3: Get all sessions
-    sessions_list, sessions_data = get_sessions(session)
+        # Step 2: POST login
+        logger.info("Logging in to Blast Connect")
+        login_response = login(session, token)
 
-    # Step 4: Get Session High Watermark 
-    engine = get_engine()
-    max_session_id = get_high_watermark(engine)
-    new_sessions = [s for s in sessions_list if s['id'] > max_session_id]
-    print(f"New sessions found: {len(new_sessions)}")
+        # Step 3: Get all sessions
+        logger.info("Fetching session list")
+        sessions_list, sessions_data = get_sessions(session)
 
-    # Step 4: Fetch putts for each session
-    all_putts = get_putts(session, new_sessions)
+        # Step 4: Get high watermark
+        engine = get_engine()
+        max_session_id = int(get_high_watermark(engine))
+        logger.info(f"High watermark: {max_session_id}")
 
-    # Step 5: Clean dataframes
-    df_putts = clean_putts_df(pd.DataFrame(all_putts))
-    sessions_df = clean_sessions_df(pd.DataFrame(new_sessions))
+        # Step 5: Filter to new sessions only
+        new_sessions = [s for s in sessions_list if int(s['id']) > max_session_id]
+        logger.info(f"New sessions found: {len(new_sessions)}")
 
-    # Step 6: Load to PostgreSQL
-    sessions_df.to_sql('blast_sessions', engine, schema='src', if_exists='append', index=False)
-    print(f"Loaded {len(sessions_df)} sessions")
+        if not new_sessions:
+            logger.info("No new sessions found - exiting pipeline")
+        else:
+            # Step 6: Fetch putts for new sessions only
+            logger.info("Fetching putts for new sessions")
+            all_putts = get_putts(session, new_sessions)
 
-    df_putts.to_sql('blast_putts', engine, schema='src', if_exists='append', index=False)
-    print(f"Loaded {len(df_putts)} putts")
+            # Step 7: Clean dataframes
+            logger.info("Cleaning dataframes")
+            df_putts = clean_putts_df(pd.DataFrame(all_putts))
+            sessions_df = clean_sessions_df(pd.DataFrame(new_sessions))
+
+            # Step 8: Load to PostgreSQL
+            logger.info("Loading to PostgreSQL")
+            with engine.begin() as conn:
+                try:
+                    upsert_sessions(sessions_df, engine)
+                    upsert_putts(df_putts, engine)cd 
+                    logger.info("Transaction committed successfully")
+                except Exception as e:
+                    logger.error(f"Transaction failed, rolling back: {e}")
+                    raise
+
+    except BlastAuthError as e:
+        logger.error(f"Authentication failed: {e}")
+        raise
+    except BlastAPIError as e:
+        logger.error(f"API error: {e}")
+        raise
+    except Exception as e:
+        logger.critical(f"Unexpected pipeline failure: {e}")
+        raise

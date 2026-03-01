@@ -3,9 +3,17 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import os
 import time
-from config import BASE_URL, LOGIN_ENDPOINT, LOGIN_HEADERS, SESSIONS_ENDPOINT, DEFAULT_PARAMS, DATA_ENDPOINT
+import random
+from exceptions import *
+from logger import get_logger
+from config import BASE_URL, LOGIN_ENDPOINT, LOGIN_HEADERS, SESSIONS_ENDPOINT, DEFAULT_PARAMS, DATA_ENDPOINT, TIMEOUT, METRIC_INDEX_MAP, MAX_RETRIES, BASE_WAIT, DB_SCHEMA
 import json 
 from bs4 import BeautifulSoup
+import requests
+from sqlalchemy.dialects.postgresql import insert
+
+
+logger = get_logger('blast_utils')
 
 def login(session, token):
     payload = {
@@ -72,27 +80,13 @@ def get_putts(session, sessions_list):
             continue
         
         for row in data['data']:
-            try:
-                putt = json.loads(row[0])
-                putt['session_id'] = s['id']
-                metrics = {
-                    'back_stroke_time':         json.loads(row[1])['value'],
-                    'forward_stroke_time':       json.loads(row[2])['value'],
-                    'total_stroke_time':         json.loads(row[3])['value'],
-                    'tempo':                     json.loads(row[4])['value'],
-                    'impact_stroke_speed':       json.loads(row[5])['value'],
-                    'back_stroke_length':        json.loads(row[6])['value'],
-                    'loft_change':               json.loads(row[7])['value'],
-                    'backstroke_rotation':       json.loads(row[8])['value'],
-                    'forward_stroke_rotation':   json.loads(row[9])['value'],
-                    'face_angle_at_impact':      json.loads(row[10])['value'],
-                    'lie_change':                json.loads(row[11])['value'],
-                }
-                putt.update(metrics)
-                all_putts.append(putt)
-            except (json.JSONDecodeError, KeyError, IndexError) as e:
-                print(f"Skipping malformed row in session {s['id']}: {e}")
-                continue
+                try:
+                    putt = parse_putt_row(row)
+                    putt['session_id'] = s['id']
+                    all_putts.append(putt)
+                except BlastParseError as e:
+                    logger.warning(f"Skipping malformed row in session {s['id']}: {e}")
+                    continue
         
         print(f"  → {len(data['data'])} putts fetched")
     
@@ -152,17 +146,43 @@ def get_engine():
     )
 
 
-def get_with_retry(session, url, params=None, retries=3, wait=10):
+def get_with_retry(session, url, params=None, retries=MAX_RETRIES, base_wait=BASE_WAIT):
+
+    last_exception = None
+
     for attempt in range(retries):
         try:
-            response = session.get(url, params=params, timeout=60)
-            return response
-        except Exception as e:
-            print(f"Attempt {attempt + 1} failed: {e}")
+            response = session.get(url, params=params, timeout=TIMEOUT)
+
+            # Check for bad HTTP status codes explicitly
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 401:
+                raise BlastAuthError(f"Unauthorized - session may have expired: {url}")
+            elif response.status_code == 429:
+                raise BlastRateLimitError(f"Rate limited by server: {url}")
+            elif response.status_code >= 500:
+                raise BlastServerError(f"Server error {response.status_code}: {url}")
+            else:
+                raise BlastAPIError(f"Unexpected status {response.status_code}: {url}")
+
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                BlastServerError) as e:
+            last_exception = e
             if attempt < retries - 1:
-                print(f"Retrying in {wait} seconds...")
+                # Exponential backoff + jitter
+                wait = (base_wait ** attempt) + random.uniform(0, 1)
+                print(f"Attempt {attempt + 1} failed: {e}")
+                print(f"Retrying in {wait:.2f} seconds...")
                 time.sleep(wait)
-    raise Exception(f"All {retries} attempts failed for {url}")
+            continue
+
+        except (BlastAuthError, BlastRateLimitError) as e:
+            # Don't retry auth or rate limit errors - fail immediately
+            raise
+
+    raise BlastAPIError(f"All {retries} attempts failed for {url}: {last_exception}")
 
 
 def get_high_watermark(engine):
@@ -173,3 +193,62 @@ def get_high_watermark(engine):
         watermark = result.scalar()
         print(f"High watermark: {watermark}")
         return watermark
+
+
+def parse_putt_row(row: list) -> dict:
+    """
+    Parse a single putt row from the API response.
+    Validates that all expected metrics are present.
+    """
+    try:
+        putt = json.loads(row[0])
+    except (json.JSONDecodeError, IndexError) as e:
+        raise BlastParseError(f"Failed to parse putt metadata: {e}")
+
+    metrics = {}
+    for metric_name, index in METRIC_INDEX_MAP.items():
+        try:
+            parsed = json.loads(row[index])
+            if 'value' not in parsed:
+                raise BlastParseError(f"Missing 'value' key for metric '{metric_name}' at index {index}")
+            metrics[metric_name] = parsed['value']
+        except IndexError:
+            raise BlastParseError(f"Row too short - missing metric '{metric_name}' at index {index}")
+        except json.JSONDecodeError as e:
+            raise BlastParseError(f"Failed to parse metric '{metric_name}' at index {index}: {e}")
+
+    putt.update(metrics)
+    return putt
+
+def upsert_sessions(df: pd.DataFrame, engine) -> None:
+    """Insert new sessions, skip if already exists"""
+    records = df.to_dict(orient='records')
+    
+    with engine.begin() as conn:  # engine.begin() auto commits or rolls back
+        stmt = insert(get_sessions_table(engine)).values(records)
+        stmt = stmt.on_conflict_do_nothing(index_elements=['blast_session_id'])
+        conn.execute(stmt)
+        logger.info(f"Upserted {len(records)} sessions")
+
+
+def upsert_putts(df: pd.DataFrame, engine) -> None:
+    """Insert new putts, skip if already exists"""
+    records = df.to_dict(orient='records')
+    
+    with engine.begin() as conn:
+        stmt = insert(get_putts_table(engine)).values(records)
+        stmt = stmt.on_conflict_do_nothing(index_elements=['blast_id'])
+        conn.execute(stmt)
+        logger.info(f"Upserted {len(records)} putts")
+
+
+def get_sessions_table(engine):
+    from sqlalchemy import MetaData, Table
+    metadata = MetaData()
+    return Table('blast_sessions', metadata, autoload_with=engine, schema=DB_SCHEMA)
+
+
+def get_putts_table(engine):
+    from sqlalchemy import MetaData, Table
+    metadata = MetaData()
+    return Table('blast_putts', metadata, autoload_with=engine, schema=DB_SCHEMA)
