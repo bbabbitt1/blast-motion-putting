@@ -186,12 +186,15 @@ def get_with_retry(session, url, params=None, retries=MAX_RETRIES, base_wait=BAS
 
 
 def get_high_watermark(engine):
-    with open('sql/queries/get_high_watermark.sql') as f:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    query_path = os.path.join(base_dir, 'sql', 'queries', 'get_high_watermark.sql')
+    
+    with open(query_path) as f:
         query = f.read()
     with engine.connect() as conn:
         result = conn.execute(text(query))
         watermark = result.scalar()
-        print(f"High watermark: {watermark}")
+        logger.info(f"High watermark: {watermark}")
         return watermark
 
 
