@@ -149,6 +149,7 @@ def get_engine():
         f"PWD={os.getenv('DB_PASSWORD')};"
         "Encrypt=yes;"
         "TrustServerCertificate=no;"
+        "Connection Timeout=30;"
     )
     return create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
 

@@ -6,7 +6,12 @@ app = func.FunctionApp()
 
 @app.route(route="health", auth_level=func.AuthLevel.ANONYMOUS, methods=["GET"])
 def health_check(req: func.HttpRequest) -> func.HttpResponse:
-    return func.HttpResponse("OK", status_code=200)
+    import os
+    db_server = os.getenv('DB_SERVER', 'NOT SET')
+    db_driver = os.getenv('DB_DRIVER', 'NOT SET')
+    db_name = os.getenv('DB_NAME', 'NOT SET')
+    db_user = os.getenv('DB_USER', 'NOT SET')
+    return func.HttpResponse(f"OK | server={db_server} | driver={db_driver} | db={db_name} | user={db_user}", status_code=200)
 
 
 @app.timer_trigger(schedule="0 0 5 * * *", arg_name="timer", run_on_startup=False)
