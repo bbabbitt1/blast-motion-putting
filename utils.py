@@ -1,16 +1,16 @@
 import pandas as pd
-from sqlalchemy import create_engine, text 
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import os
 import time
 import random
+import urllib
 from exceptions import *
 from logger import get_logger
 from config import BASE_URL, LOGIN_ENDPOINT, LOGIN_HEADERS, SESSIONS_ENDPOINT, DEFAULT_PARAMS, DATA_ENDPOINT, TIMEOUT, METRIC_INDEX_MAP, MAX_RETRIES, BASE_WAIT, DB_SCHEMA
-import json 
+import json
 from bs4 import BeautifulSoup
 import requests
-from sqlalchemy.dialects.postgresql import insert
 
 
 logger = get_logger('blast_utils')
@@ -141,9 +141,16 @@ def clean_putts_df(df: pd.DataFrame) -> pd.DataFrame:
 load_dotenv()
 
 def get_engine():
-    return create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+    params = urllib.parse.quote_plus(
+        f"DRIVER={{{os.getenv('DB_DRIVER')}}};"
+        f"SERVER={os.getenv('DB_SERVER')},1433;"
+        f"DATABASE={os.getenv('DB_NAME')};"
+        f"UID={os.getenv('DB_USER')};"
+        f"PWD={os.getenv('DB_PASSWORD')};"
+        "Encrypt=yes;"
+        "TrustServerCertificate=no;"
     )
+    return create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
 
 
 def get_with_retry(session, url, params=None, retries=MAX_RETRIES, base_wait=BASE_WAIT):
@@ -225,33 +232,36 @@ def parse_putt_row(row: list) -> dict:
 
 def upsert_sessions(df: pd.DataFrame, engine) -> None:
     """Insert new sessions, skip if already exists"""
-    records = df.to_dict(orient='records')
-    
-    with engine.begin() as conn:  # engine.begin() auto commits or rolls back
-        stmt = insert(get_sessions_table(engine)).values(records)
-        stmt = stmt.on_conflict_do_nothing(index_elements=['blast_session_id'])
-        conn.execute(stmt)
-        logger.info(f"Upserted {len(records)} sessions")
+    with engine.begin() as conn:
+        for _, row in df.iterrows():
+            conn.execute(text("""
+                IF NOT EXISTS (SELECT 1 FROM src.blast_sessions WHERE blast_session_id = :blast_session_id)
+                INSERT INTO src.blast_sessions (blast_session_id, session_type_id, session_name)
+                VALUES (:blast_session_id, :session_type_id, :session_name)
+            """), {
+                'blast_session_id': int(row['blast_session_id']),
+                'session_type_id': int(row['session_type_id']),
+                'session_name': str(row['session_name'])
+            })
+        logger.info(f"Upserted {len(df)} sessions")
 
 
 def upsert_putts(df: pd.DataFrame, engine) -> None:
     """Insert new putts, skip if already exists"""
-    records = df.to_dict(orient='records')
-    
     with engine.begin() as conn:
-        stmt = insert(get_putts_table(engine)).values(records)
-        stmt = stmt.on_conflict_do_nothing(index_elements=['blast_id'])
-        conn.execute(stmt)
-        logger.info(f"Upserted {len(records)} putts")
-
-
-def get_sessions_table(engine):
-    from sqlalchemy import MetaData, Table
-    metadata = MetaData()
-    return Table('blast_sessions', metadata, autoload_with=engine, schema=DB_SCHEMA)
-
-
-def get_putts_table(engine):
-    from sqlalchemy import MetaData, Table
-    metadata = MetaData()
-    return Table('blast_putts', metadata, autoload_with=engine, schema=DB_SCHEMA)
+        for _, row in df.iterrows():
+            conn.execute(text("""
+                IF NOT EXISTS (SELECT 1 FROM src.blast_putts WHERE blast_id = :blast_id)
+                INSERT INTO src.blast_putts (
+                    blast_id, session_id, user_id, putt_date, equipment, handedness,
+                    is_air_swing, back_stroke_time, forward_stroke_time, total_stroke_time,
+                    tempo, impact_stroke_speed, back_stroke_length, loft_change,
+                    backstroke_rotation, forward_stroke_rotation, face_angle_at_impact, lie_change
+                ) VALUES (
+                    :blast_id, :session_id, :user_id, :putt_date, :equipment, :handedness,
+                    :is_air_swing, :back_stroke_time, :forward_stroke_time, :total_stroke_time,
+                    :tempo, :impact_stroke_speed, :back_stroke_length, :loft_change,
+                    :backstroke_rotation, :forward_stroke_rotation, :face_angle_at_impact, :lie_change
+                )
+            """), row.to_dict())
+        logger.info(f"Upserted {len(df)} putts")

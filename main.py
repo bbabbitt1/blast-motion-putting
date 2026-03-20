@@ -72,8 +72,8 @@ def run_pipeline():
             df_putts = clean_putts_df(pd.DataFrame(all_putts))
             sessions_df = clean_sessions_df(pd.DataFrame(new_sessions))
 
-            # Step 8: Load to PostgreSQL
-            logger.info("Loading to PostgreSQL")
+            # Step 8: Load to Azure SQL
+            logger.info("Loading to Azure SQL")
             with engine.begin() as conn:
                 try:
                     upsert_sessions(sessions_df, engine)
