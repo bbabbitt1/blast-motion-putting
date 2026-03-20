@@ -6,24 +6,17 @@ def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
 
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        # Console handler (also captured by Azure Application Insights)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
 
-    # File handler - writes to logs/pipeline.log
-    file_handler = logging.FileHandler('logs/pipeline.log')
-    file_handler.setLevel(logging.INFO)
-
-    # Format
-    formatter = logging.Formatter(
-        '%(asctime)s | %(levelname)-8s | %(name)s | run_id=%(run_id)s | %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_handler.setFormatter(formatter)
-    file_handler.setFormatter(formatter)
-
-    logger.addHandler(console_handler)
-    logger.addHandler(file_handler)
+        formatter = logging.Formatter(
+            '%(asctime)s | %(levelname)-8s | %(name)s | run_id=%(run_id)s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
     return logger
 
