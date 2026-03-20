@@ -1,6 +1,7 @@
+azure-functions
 requests
 beautifulsoup4
 pandas
 python-dotenv
 sqlalchemy
-psycopg2-binary
+pyodbc

@@ -62,6 +62,7 @@ def run_pipeline():
 
         if not new_sessions:
             logger.info("No new sessions found - exiting pipeline")
+            return "No new sessions found"
         else:
             # Step 6: Fetch putts for new sessions only
             logger.info("Fetching putts for new sessions")
@@ -79,6 +80,7 @@ def run_pipeline():
                     upsert_sessions(sessions_df, engine)
                     upsert_putts(df_putts, engine)
                     logger.info("Transaction committed successfully")
+                    return f"Synced {len(new_sessions)} sessions, {len(df_putts)} putts"
                 except Exception as e:
                     logger.error(f"Transaction failed, rolling back: {e}")
                     raise
